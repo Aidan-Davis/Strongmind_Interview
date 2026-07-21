@@ -7,8 +7,9 @@
 # Ignore bundler config.
 /.bundle
 
-# Ignore all environment files.
-/.env*
+# Ignore local env files (keep .env.example available for docs; Compose embeds defaults).
+/.env
+/.env.local
 
 # Ignore all default key files.
 /config/master.key
@@ -40,6 +41,5 @@
 # Ignore development files
 /.devcontainer
 
-# Ignore Docker-related files
-/.dockerignore
-/Dockerfile*
+# Ignore interview brief (not part of the submission runtime)
+/strongmind_senior_dev_interview.txt

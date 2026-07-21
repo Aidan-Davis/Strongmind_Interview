@@ -1,0 +1,120 @@
+x-app: &app
+  build: .
+  image: strongmind_interview:latest
+  environment: &app_env
+    RAILS_ENV: development
+    RAILS_LOG_TO_STDOUT: "1"
+    SECRET_KEY_BASE: "development_secret_key_base_for_local_docker_only_not_for_prod"
+    DATABASE_URL: postgres://postgres:postgres@db:5432/strongmind_interview_development
+    DB_HOST: db
+    POSTGRES_USER: postgres
+    POSTGRES_PASSWORD: postgres
+    REDIS_URL: redis://redis:6379/0
+    AWS_ACCESS_KEY_ID: minioadmin
+    AWS_SECRET_ACCESS_KEY: minioadmin
+    AWS_REGION: us-east-1
+    AWS_ENDPOINT: http://minio:9000
+    AWS_BUCKET: github-ingest
+    FORCE_SSL: "false"
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    minio:
+      condition: service_started
+  networks:
+    - internal
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: strongmind_interview_development
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - internal
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - internal
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/github-ingest;
+      exit 0;
+      "
+    networks:
+      - internal
+
+  web:
+    <<: *app
+    command: ["./bin/rails", "server", "-b", "0.0.0.0", "-p", "3000"]
+    ports:
+      - "3000:3000"
+
+  sidekiq:
+    <<: *app
+    command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
+
+  # One-shot: docker compose run --rm ingest
+  ingest:
+    <<: *app
+    profiles: ["cli"]
+    command: ["./bin/rails", "ingest:run"]
+
+  # One-shot: docker compose run --rm test
+  test:
+    <<: *app
+    profiles: ["cli"]
+    environment:
+      <<: *app_env
+      RAILS_ENV: test
+      DATABASE_URL: postgres://postgres:postgres@db:5432/strongmind_interview_test
+    command: ["bundle", "exec", "rspec"]
+
+volumes:
+  postgres_data:
+  minio_data:
+
+networks:
+  internal:
