@@ -2,6 +2,9 @@
 
 # Send Rails logs to stdout/stderr so `docker compose logs -f` shows system behavior.
 if ENV["RAILS_LOG_TO_STDOUT"].present?
+  $stdout.sync = true
+  $stderr.sync = true
+
   stdout_logger = ActiveSupport::Logger.new($stdout)
   stdout_logger.formatter = Logger::Formatter.new
   Rails.logger = ActiveSupport::TaggedLogging.new(stdout_logger)
