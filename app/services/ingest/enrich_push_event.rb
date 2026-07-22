@@ -42,6 +42,7 @@ module Ingest
       existing = Actor.find_by(github_id: github_id)
       if existing&.cache_fresh?(ttl: @cache_ttl)
         log("actor_cache_hit", github_id: github_id, login: existing.login)
+        ensure_avatar!(existing)
         return existing
       end
 
@@ -57,6 +58,7 @@ module Ingest
         actor.profile_json = body
         actor.fetched_at = Time.current
         actor.save!
+        ensure_avatar!(actor)
       end
     end
 
@@ -100,6 +102,13 @@ module Ingest
       wait = [ rate_limit.seconds_until_reset, 1 ].max
       log("preemptive_rate_limit_wait", wait_seconds: wait, remaining: rate_limit.remaining)
       sleep wait
+    end
+
+    def ensure_avatar!(actor)
+      ObjectStorage::AvatarUploader.call(actor)
+    rescue ObjectStorage::Client::Error, Faraday::Error => e
+      # Avatar storage is best-effort; enrichment of structured actor/repo data still succeeds.
+      log("avatar_storage_failed", actor_id: actor.id, error: e.message)
     end
 
     def log(event, **fields)

@@ -86,6 +86,7 @@ module Ingest
       if was_new
         record.assign_attributes(attrs.merge(enrichment_status: "pending"))
         record.save!
+        StoreRawEventJob.perform_later(record.id)
         enqueue_enrichment!(record)
         { status: :created, enqueued: true }
       else

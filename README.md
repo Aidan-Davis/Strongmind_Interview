@@ -87,3 +87,23 @@ docker compose exec db psql -U postgres -d strongmind_interview_development -c \
    ORDER BY pe.id DESC LIMIT 10;"
 ```
 Expect `enriched` rows with actor login + repository full_name. Re-enrichment of the same actor/repo should log cache hits within 24h.
+
+### Step 6 — Object storage (MinIO)
+```bash
+docker compose up --build -d
+docker compose run --rm ingest
+docker compose logs --tail 50 sidekiq | grep storage
+```
+Expect `[storage] raw_uploaded` and (after enrichment) `[storage] avatar_uploaded` (or `*_exists` on re-run).
+
+```bash
+docker compose exec db psql -U postgres -d strongmind_interview_development -c \
+  "SELECT id, github_event_id, raw_object_key IS NOT NULL AS has_raw FROM push_events ORDER BY id DESC LIMIT 5;"
+
+docker compose exec db psql -U postgres -d strongmind_interview_development -c \
+  "SELECT login, avatar_object_key FROM actors WHERE avatar_object_key IS NOT NULL LIMIT 5;"
+```
+
+MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`) → bucket `github-ingest` → `raw-events/` and `avatars/`.
+
+Re-run storage for the same event/actor — keys are stable (`raw-events/{event_id}.json`, `avatars/{github_id}.*`) so objects are not re-downloaded/re-uploaded.
