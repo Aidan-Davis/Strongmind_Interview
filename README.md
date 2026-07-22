@@ -107,3 +107,15 @@ docker compose exec db psql -U postgres -d strongmind_interview_development -c \
 MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`) → bucket `github-ingest` → `raw-events/` and `avatars/`.
 
 Re-run storage for the same event/actor — keys are stable (`raw-events/{event_id}.json`, `avatars/{github_id}.*`) so objects are not re-downloaded/re-uploaded.
+
+### Step 7 — Operability / logging
+```bash
+docker compose logs -f ingest-worker sidekiq web
+```
+Expect structured lines like:
+- `[ingest] poll_start` / `poll_complete` / `rate_limited` / `malformed_event`
+- `[enrich] actor_fetch` / `enriched` / `rate_limited`
+- `[storage] raw_uploaded` / `avatar_uploaded`
+- `[job] start` / `success` / `failure`
+
+Malformed events are skipped (no crash). Transient GitHub/MinIO errors are logged and retried; the ingest loop keeps running.

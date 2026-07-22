@@ -14,19 +14,20 @@ module Ingest
     end
 
     def run_once
-      log("poll_start", etag: @etag.present?)
+      AppLog.info("ingest", "poll_start", etag: @etag.present?)
       result = @client.fetch_events(etag: @etag)
       @etag = result.etag if result.etag.present?
 
       maybe_wait_for_rate_limit!(result.rate_limit)
 
       if result.not_modified
-        log("not_modified", remaining: result.rate_limit&.remaining)
+        AppLog.info("ingest", "not_modified", remaining: result.rate_limit&.remaining)
         return { seen: 0, created: 0, skipped: 0, enqueued: 0, not_modified: true }
       end
 
       stats = process_events(result.events)
-      log(
+      AppLog.info(
+        "ingest",
         "poll_complete",
         seen: stats[:seen],
         created: stats[:created],
@@ -37,21 +38,30 @@ module Ingest
       stats.merge(not_modified: false)
     rescue Github::EventsClient::RateLimited => e
       wait = [ e.rate_limit.seconds_until_reset, 5 ].max
-      log("rate_limited", wait_seconds: wait, remaining: e.rate_limit.remaining)
+      AppLog.warn("ingest", "rate_limited", wait_seconds: wait, remaining: e.rate_limit.remaining)
       sleep wait
       { seen: 0, created: 0, skipped: 0, enqueued: 0, rate_limited: true }
     rescue Faraday::Error, Github::EventsClient::Error => e
-      log("transient_error", error: e.class.name, message: e.message)
+      AppLog.warn("ingest", "transient_error", error: e.class.name, message: e.message)
+      sleep @poll_interval
+      { seen: 0, created: 0, skipped: 0, enqueued: 0, error: e.message }
+    rescue StandardError => e
+      # Never crash the worker on unexpected errors — log, back off, continue.
+      AppLog.error("ingest", "unexpected_error", error: e.class.name, message: e.message)
       sleep @poll_interval
       { seen: 0, created: 0, skipped: 0, enqueued: 0, error: e.message }
     end
 
     def run_loop
-      log("loop_start", poll_interval: @poll_interval, idle_interval: @idle_interval)
+      AppLog.info("ingest", "loop_start", poll_interval: @poll_interval, idle_interval: @idle_interval)
       loop do
         stats = run_once
         interval = stats[:not_modified] || stats[:rate_limited] ? @idle_interval : @poll_interval
+        AppLog.info("ingest", "sleep", seconds: interval)
         sleep interval
+      rescue StandardError => e
+        AppLog.error("ingest", "loop_error", error: e.class.name, message: e.message)
+        sleep @idle_interval
       end
     end
 
@@ -71,7 +81,21 @@ module Ingest
           stats[:enqueued] += 1 if outcome[:enqueued]
         rescue ArgumentError, ActiveRecord::RecordInvalid => e
           stats[:skipped] += 1
-          log("malformed_event", error: e.message, event_id: event.is_a?(Hash) ? event["id"] : nil)
+          AppLog.warn(
+            "ingest",
+            "malformed_event",
+            error: e.message,
+            event_id: event.is_a?(Hash) ? event["id"] : nil
+          )
+        rescue StandardError => e
+          stats[:skipped] += 1
+          AppLog.error(
+            "ingest",
+            "event_processing_error",
+            error: e.class.name,
+            message: e.message,
+            event_id: event.is_a?(Hash) ? event["id"] : nil
+          )
         end
       end
 
@@ -88,10 +112,9 @@ module Ingest
         record.save!
         StoreRawEventJob.perform_later(record.id)
         enqueue_enrichment!(record)
+        AppLog.info("ingest", "event_created", github_event_id: record.github_event_id, push_event_id: record.id)
         { status: :created, enqueued: true }
       else
-        # Duplicates are no-ops. Pending rows keep their status until enrichment runs;
-        # Sidekiq retries cover transient enrichment failures without poll fan-out.
         { status: :skipped, enqueued: false }
       end
     end
@@ -104,15 +127,8 @@ module Ingest
       return unless rate_limit&.should_wait?
 
       wait = [ rate_limit.seconds_until_reset, 1 ].max
-      log("preemptive_rate_limit_wait", wait_seconds: wait, remaining: rate_limit.remaining)
+      AppLog.warn("ingest", "preemptive_rate_limit_wait", wait_seconds: wait, remaining: rate_limit.remaining)
       sleep wait
-    end
-
-    def log(event, **fields)
-      payload = fields.map { |k, v| "#{k}=#{v.inspect}" }.join(" ")
-      message = "[ingest] #{event}#{payload.present? ? " #{payload}" : ""}"
-      Rails.logger.info(message)
-      puts message
     end
   end
 end

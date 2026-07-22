@@ -11,7 +11,7 @@ namespace :ingest do
       runner.run_loop
     else
       stats = runner.run_once
-      puts "[ingest] done #{stats.inspect}"
+      AppLog.info("ingest", "done", **stats)
     end
   end
 end

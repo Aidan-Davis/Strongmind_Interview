@@ -4,6 +4,8 @@ x-app: &app
   environment: &app_env
     RAILS_ENV: development
     RAILS_LOG_TO_STDOUT: "1"
+    RAILS_LOG_LEVEL: info
+    APP_LOG_MIRROR_STDOUT: "1"
     SECRET_KEY_BASE: "development_secret_key_base_for_local_docker_only_not_for_prod"
     DATABASE_URL: postgres://postgres:postgres@db:5432/strongmind_interview_development
     DB_HOST: db

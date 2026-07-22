@@ -55,8 +55,7 @@ module ObjectStorage
     private
 
     def log(event, **fields)
-      payload = fields.map { |k, v| "#{k}=#{v.inspect}" }.join(" ")
-      Rails.logger.info("[storage] #{event} #{payload}")
+      AppLog.info("storage", event, **fields)
     end
   end
 end

@@ -107,14 +107,11 @@ module Ingest
     def ensure_avatar!(actor)
       ObjectStorage::AvatarUploader.call(actor)
     rescue ObjectStorage::Client::Error, Faraday::Error => e
-      # Avatar storage is best-effort; enrichment of structured actor/repo data still succeeds.
       log("avatar_storage_failed", actor_id: actor.id, error: e.message)
     end
 
     def log(event, **fields)
-      payload = fields.map { |k, v| "#{k}=#{v.inspect}" }.join(" ")
-      message = "[enrich] #{event} #{payload}".strip
-      Rails.logger.info(message)
+      AppLog.info("enrich", event, **fields)
     end
   end
 end

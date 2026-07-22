@@ -9,7 +9,7 @@ class StoreRawEventJob < ApplicationJob
   def perform(push_event_id)
     push_event = PushEvent.find_by(id: push_event_id)
     unless push_event
-      Rails.logger.warn("[storage] missing_push_event push_event_id=#{push_event_id}")
+      AppLog.warn("storage", "missing_push_event", push_event_id: push_event_id)
       return
     end
 
