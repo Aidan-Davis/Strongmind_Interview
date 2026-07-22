@@ -1,4 +1,4 @@
-:concurrency: 2
+:concurrency: 1
 :queues:
+  - [enrichment, 2]
   - [default, 1]
-  - [enrichment, 1]

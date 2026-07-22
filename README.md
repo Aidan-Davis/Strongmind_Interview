@@ -67,7 +67,23 @@ docker compose exec db psql -U postgres -d strongmind_interview_development \
 ```
 Expect PushEvent rows with structured columns. Re-run `docker compose run --rm ingest` — row count for the same `github_event_id`s should not grow (idempotent upserts).
 
+### Step 5 — Enrichment
 ```bash
-docker compose logs --tail 30 sidekiq
+docker compose up --build -d
+docker compose run --rm ingest
+docker compose logs -f sidekiq
 ```
-Expect `[enrich] stub_received push_event_id=...` for newly created events.
+Expect `[enrich] actor_fetch` / `repo_fetch` (or `*_cache_hit`), then `enriched`.
+
+```bash
+docker compose exec db psql -U postgres -d strongmind_interview_development -c \
+  "SELECT enrichment_status, count(*) FROM push_events GROUP BY 1 ORDER BY 1;"
+
+docker compose exec db psql -U postgres -d strongmind_interview_development -c \
+  "SELECT pe.id, pe.enrichment_status, a.login, r.full_name
+   FROM push_events pe
+   LEFT JOIN actors a ON a.id = pe.actor_id
+   LEFT JOIN repositories r ON r.id = pe.repository_record_id
+   ORDER BY pe.id DESC LIMIT 10;"
+```
+Expect `enriched` rows with actor login + repository full_name. Re-enrichment of the same actor/repo should log cache hits within 24h.
