@@ -9,7 +9,7 @@ gem "puma", ">= 5.0"
 # Build JSON APIs with ease [https://github.com/rails/jbuilder]
 # gem "jbuilder"
 # Background jobs (enrichment, object storage uploads)
-gem "sidekiq", "~> 7.3"
+gem "sidekiq", "~> 8.0"
 # Sidekiq 7.3 is incompatible with connection_pool 3.x
 gem "connection_pool", "~> 2.4"
 gem "redis", ">= 4.0.1"
