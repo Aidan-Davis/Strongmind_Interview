@@ -96,10 +96,23 @@ services:
     <<: *app
     command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
 
+  # Continuous unattended polling (starts with docker compose up)
+  ingest-worker:
+    <<: *app
+    environment:
+      <<: *app_env
+      INGEST_MODE: loop
+      INGEST_POLL_INTERVAL_SECONDS: "60"
+      INGEST_IDLE_INTERVAL_SECONDS: "90"
+    command: ["./bin/rails", "ingest:run"]
+
   # One-shot: docker compose run --rm ingest
   ingest:
     <<: *app
     profiles: ["cli"]
+    environment:
+      <<: *app_env
+      INGEST_MODE: once
     command: ["./bin/rails", "ingest:run"]
 
   # One-shot: docker compose run --rm test

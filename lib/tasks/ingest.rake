@@ -1,10 +1,17 @@
 # frozen_string_literal: true
 
 namespace :ingest do
-  desc "Ingest GitHub Push events (stub until the ingest pipeline is implemented)"
+  desc "Ingest GitHub Push events (INGEST_MODE=once|loop, default once)"
   task run: :environment do
-    message = "[ingest] Stub OK — Docker wiring works. Pipeline lands in a later step."
-    Rails.logger.info(message)
-    puts message
+    mode = ENV.fetch("INGEST_MODE", "once")
+    runner = Ingest::PushEventsRunner.new
+
+    case mode
+    when "loop", "continuous"
+      runner.run_loop
+    else
+      stats = runner.run_once
+      puts "[ingest] done #{stats.inspect}"
+    end
   end
 end
