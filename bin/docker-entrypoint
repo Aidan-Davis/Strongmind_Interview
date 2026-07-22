@@ -13,14 +13,18 @@ prepare_db() {
   ./bin/rails db:prepare
 }
 
+# Only the web server owns migrations to avoid ConcurrentMigrationError with sidekiq.
 case "${1}" in
   ./bin/rails|bin/rails)
-    if [ "${2}" = "server" ] || [ "${2}" = "ingest:run" ]; then
+    if [ "${2}" = "server" ]; then
       prepare_db
+    elif [ "${2}" = "ingest:run" ]; then
+      # Ingest assumes schema exists; create DB if needed without fighting web.
+      ./bin/rails db:prepare
     fi
     ;;
   bundle)
-    if [ "${2}" = "exec" ] && { [ "${3}" = "sidekiq" ] || [ "${3}" = "rspec" ]; }; then
+    if [ "${2}" = "exec" ] && [ "${3}" = "rspec" ]; then
       prepare_db
     fi
     ;;

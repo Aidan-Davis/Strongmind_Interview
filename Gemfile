@@ -10,6 +10,8 @@ gem "puma", ">= 5.0"
 # gem "jbuilder"
 # Background jobs (enrichment, object storage uploads)
 gem "sidekiq", "~> 7.3"
+# Sidekiq 7.3 is incompatible with connection_pool 3.x
+gem "connection_pool", "~> 2.4"
 gem "redis", ">= 4.0.1"
 
 # HTTP client for GitHub API
