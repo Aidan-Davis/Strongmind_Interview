@@ -1,15 +1,8 @@
 # frozen_string_literal: true
 
-require "faraday"
-
 module Github
   class EventsClient
     BASE_URL = "https://api.github.com"
-    DEFAULT_USER_AGENT = "StrongmindInterview-GitHubIngest/1.0"
-
-    # Bound every request so a hung GitHub socket can't stall the poll loop.
-    OPEN_TIMEOUT = Integer(ENV.fetch("GITHUB_HTTP_OPEN_TIMEOUT_SECONDS", "5"))
-    READ_TIMEOUT = Integer(ENV.fetch("GITHUB_HTTP_TIMEOUT_SECONDS", "15"))
 
     class Error < StandardError; end
     class RateLimited < Error
@@ -23,9 +16,8 @@ module Github
 
     Result = Struct.new(:events, :etag, :rate_limit, :not_modified, keyword_init: true)
 
-    def initialize(user_agent: ENV.fetch("GITHUB_USER_AGENT", DEFAULT_USER_AGENT), connection: nil)
-      @user_agent = user_agent
-      @connection = connection || default_connection
+    def initialize(user_agent: ENV.fetch("GITHUB_USER_AGENT", Connection::DEFAULT_USER_AGENT), connection: nil)
+      @connection = connection || Connection.build(base_url: BASE_URL, user_agent: user_agent)
     end
 
     # Fetches public events. Pass +etag+ for conditional requests (304 => not_modified).
@@ -55,21 +47,6 @@ module Github
         )
       else
         raise Error, "GitHub /events failed with HTTP #{response.status}: #{response.body.to_s.truncate(200)}"
-      end
-    end
-
-    private
-
-    def default_connection
-      Faraday.new(url: BASE_URL) do |f|
-        f.request :json
-        f.response :json, content_type: /\bjson$/
-        f.options.open_timeout = OPEN_TIMEOUT
-        f.options.timeout = READ_TIMEOUT
-        f.adapter Faraday.default_adapter
-        f.headers["Accept"] = "application/vnd.github+json"
-        f.headers["User-Agent"] = @user_agent
-        f.headers["X-GitHub-Api-Version"] = "2022-11-28"
       end
     end
   end
