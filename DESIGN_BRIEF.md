@@ -68,10 +68,12 @@ events age out of the window **permanently**. A backlog of `pending` rows is
 recoverable once the dependency returns. I deliberately trade eventual consistency
 (rows queryable before enrichment finishes) for window protection.
 
-**Why Sidekiq concurrency = 1.** Decoupling is for restart safety and window
-protection, **not** throughput. Concurrent enrichment against one shared ~60/hour
-budget only amplifies contention. The queue absorbs bursts; the cap drains them at a
-quota-safe rate.
+**Why a queue at all (Sidekiq, concurrency 1).** A queue is *not* mandatory here -
+with ~60/hour it buys no throughput, and restart safety alone could come from
+re-scanning `pending` rows. I chose it to keep enrichment fully off the poll thread
+(window protection) and to get retry/backoff scheduling for free; concurrency 1 means
+it can't amplify fan-out against the shared budget. It degrades cleanly to a
+single-process scanner if fewer moving parts are preferred.
 
 **Why three persistence shapes, not one blob.** Raw `jsonb` (+ optional object
 copy) exists because the feed can't be re-fetched later. Promoted columns exist so
@@ -89,13 +91,12 @@ metrics stack.
 ## Rate limits & durability
 
 **Rate limits.** The scarce resource is enrichment fan-out (up to two fetches per
-new event), not polling. Polling uses ETag/`304` to skip bodies; under no-token,
-those `304`s still count against quota, so the real savings are bandwidth and
-avoiding needless processing - not "free" polls. Header-aware waits, a chunked
-`[ingest] waiting` countdown (so a long wait never looks hung), concurrency 1, and
-**re-enqueue-on-rate-limit** (instead of sleeping the worker) keep the single Sidekiq
-thread free for cheap storage jobs. Assumption: demonstrate honest backoff; a token
-(5,000/hour) would tighten intervals without redesign.
+new event), not polling. ETag/`304` skips bodies (though under no-token those `304`s
+still count against quota, so the win is bandwidth, not "free" polls). Header-aware
+waits, a chunked `[ingest] waiting` countdown, and **re-enqueue-on-rate-limit**
+(instead of sleeping the worker) keep the single thread free for cheap storage jobs.
+Assumption: demonstrate honest backoff; a token (5,000/hour) tightens intervals
+without redesign.
 
 **Durability / idempotency.** Unique `github_event_id` makes overlapping polls and
 restarts converge rather than duplicate. Enrichment short-circuits when already
@@ -105,11 +106,10 @@ checks skip re-upload. There is no fragile checkpoint cursor - killing the runne
 mid-cycle re-reads at most one page, all no-ops. Theme: **every unit of work is safe
 to repeat**, which is the only reliable posture for an unattended process.
 
-**Object storage.** Chosen to practice the real S3 shape locally (MinIO via
-`aws-sdk-s3` - production is config). Async raw upload keeps MinIO off the poll
-path. Avatars are best-effort so a decoration failure never fails the record it
-decorates. Bounding *re-work* (upload-once) was in scope; bounding *retention* was
-not - see below.
+**Object storage.** MinIO via `aws-sdk-s3` (production S3 is config). Async raw
+upload keeps MinIO off the poll path; avatars are best-effort so a decoration failure
+never fails the record. Bounding *re-work* (upload-once) was in scope; *retention*
+was not - see below.
 
 ## Key tradeoffs & assumptions
 
