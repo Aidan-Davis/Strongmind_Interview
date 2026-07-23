@@ -89,6 +89,15 @@ Structured stdout logs (`[ingest]`, `[enrich]`, `[storage]`, `[job]`) are meant 
 - Warehouse/analytics transforms, retention policies, alerting
 - Production secrets management / Kamal deploy target (Compose is the deliverable runtime)
 
+## Known issues found and fixed during final testing
+
+Before submitting, I re-ran the reviewer flow end-to-end from a clean checkout (fresh clone, `docker compose up --build`, cold database/volumes) rather than relying only on the existing test suite, and found four real bugs the specs didn't catch. All were fixed, covered with regression tests, and verified against a second clean checkout:
+
+1. **Actor enrichment crashed on real bot accounts.** GitHub's live public events API returns `actor.url` with literal, unescaped brackets for bot accounts (e.g. `.../users/github-actions[bot]`), which is not a valid URI and raised `URI::InvalidURIError`. Bots (`github-actions[bot]`, `dependabot[bot]`, `renovate[bot]`, etc.) are extremely common in the real event stream, so this was hitting a large fraction of enrichment jobs, not an edge case. Fixed by sanitizing any actor/repo URL (both GitHub-supplied and our own fallback-constructed one) before fetching, and by treating `URI::InvalidURIError` as a permanent, non-retryable job failure instead of letting Sidekiq retry indefinitely on the same bad input.
+2. **The Sidekiq enrichment worker blocked on rate-limit waits.** With `Sidekiq` concurrency 1, a preemptive rate-limit sleep inside the job stalled every other queued job (including cheap raw-event uploads) for up to the ~1 hour reset window. Fixed by raising instead of sleeping; the job now re-enqueues with a delay, freeing the worker thread. Work already fetched before the limit was hit is persisted rather than discarded.
+3. **The one-shot reviewer command could hang for up to an hour.** `docker compose run --rm ingest` shared the same GitHub quota as the continuous `ingest-worker`, so if the quota was already low, the one-shot command would block on the same sleep-based backoff as the long-running loop. Fixed by making the runner's backoff non-blocking in one-shot mode: it logs the wait it would need and returns immediately (exit 0), while continuous polling keeps sleeping/retrying normally.
+4. **`web` and `ingest-worker` raced to initialize the schema on a fresh database.** Both containers call `rails db:prepare` on startup; on a brand-new Postgres volume this occasionally lost a race and crash-looped one container with a `PG::UniqueViolation` on a fresh clone's very first `docker compose up`. Fixed with a small retry-on-failure loop in the entrypoint: the loser simply retries a few seconds later, by which point the winner has already loaded the schema.
+
 ## What “done” means
 
 From a clean checkout: `docker compose up --build` runs without crash-looping; ingest creates durable PushEvent rows; enrichment attaches actor/repo when quota allows; MinIO holds raw/avatar objects; tests pass under Compose; operators can diagnose behavior from logs alone.
