@@ -13,6 +13,11 @@ module Github
     READ_TIMEOUT = Integer(ENV.fetch("GITHUB_HTTP_TIMEOUT_SECONDS", "15"))
 
     class Error < StandardError; end
+
+    # A missing actor/repo (deleted account or repository) will never succeed on
+    # retry, so it's raised as a distinct, non-retryable error.
+    class NotFound < Error; end
+
     class RateLimited < Error
       attr_reader :rate_limit
 
@@ -44,7 +49,7 @@ module Github
           rate_limit: rate_limit
         )
       when 404
-        raise Error, "GitHub resource not found: #{url}"
+        raise NotFound, "GitHub resource not found: #{url}"
       else
         raise Error, "GitHub GET #{url} failed with HTTP #{response.status}"
       end
