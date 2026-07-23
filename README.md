@@ -59,6 +59,8 @@ docker compose logs -f ingest-worker sidekiq
 
 Logs are written to stdout/stderr as structured lines like `[ingest] …`, `[enrich] …`, `[storage] …`, `[job] …`.
 
+If the shared GitHub quota is exhausted, the continuous `ingest-worker` waits for it to reset and emits a `[ingest] waiting seconds_remaining=…` countdown (every ~30s) rather than going silent — so a quiet log during a wait is expected, not a hang.
+
 ## How to verify it’s working
 
 Give the stack 1–2 minutes after `up --build` for the first poll/enrichment cycle (longer if GitHub rate limits are exhausted).
@@ -120,8 +122,10 @@ Bucket: `github-ingest` → `raw-events/` and `avatars/`
 ### 5. Enrichment / job logs
 
 ```bash
-docker compose logs --tail 80 sidekiq
+docker compose logs sidekiq | grep -E "\[enrich\]|\[storage\]" | tail -20
 ```
+
+(Grep the full log, then `tail`. Avoid `docker compose logs --tail N sidekiq | grep …`: because Sidekiq is chatty, the `[enrich]` lines can scroll past the last N lines and grep returns nothing even though enrichment worked.)
 
 Expect `[enrich] actor_fetch` or `actor_cache_hit`, then `enriched`, plus `[storage] raw_uploaded` / `avatar_uploaded` (or `*_exists`).
 

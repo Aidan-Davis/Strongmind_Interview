@@ -78,7 +78,9 @@ Rate-limit logic: [app/services/github/rate_limit.rb](app/services/github/rate_l
 1. Poll interval defaults to 60s; longer idle sleep on `304` / rate-limited paths.
 2. `ETag` / `If-None-Match` on `/events` avoids downloading unchanged bodies.
 3. Header-aware waits on `X-RateLimit-*` and `Retry-After`; preemptive backoff when
-   remaining is low.
+   remaining is low. The continuous worker's wait is chunked with a
+   `[ingest] waiting seconds_remaining=...` countdown so it stays observable
+   (never silent) even during an hour-long wait.
 4. No inline enrichment during ingest - work is enqueued.
 5. Sidekiq concurrency = 1 on enrichment bounds request amplification ([config/sidekiq.yml](config/sidekiq.yml)).
 6. On rate limit during enrichment the job **re-enqueues after reset** instead of
@@ -116,6 +118,9 @@ for this exercise; production would add TTL/archival.
   ([app/jobs/enrich_push_event_job.rb](app/jobs/enrich_push_event_job.rb), `Github::ApiClient::NotFound`).
 - **Bot accounts:** GitHub sends `actor.url` for bots with literal brackets
   (`.../github-actions[bot]`); URLs are sanitized before fetch ([app/services/ingest/enrich_push_event.rb](app/services/ingest/enrich_push_event.rb) `sanitize_url`).
+- **Object-storage outages:** MinIO/S3 connectivity failures are wrapped as
+  `ObjectStorage::Client::Error` and retried with backoff by the jobs, so a storage
+  blip doesn't lose data or crash the worker ([app/services/object_storage/client.rb](app/services/object_storage/client.rb)).
 - **Never crash-loops:** the ingest loop catches unexpected errors, logs, backs off,
   and continues; malformed events are logged and skipped.
 - **Observability:** structured stdout logs (`[ingest]`, `[enrich]`, `[storage]`,
@@ -132,8 +137,10 @@ Code: [app/services/object_storage/](app/services/object_storage/).
 
 RSpec + WebMock. Coverage: push-event mapper, rate-limit math, both GitHub clients'
 status handling (200/304/403/404), model-level uniqueness, idempotent ingest,
-enrichment cache hits, job failure/requeue paths, upload-once storage, and the
-health endpoint. Reviewer entrypoint: `docker compose run --rm --build test`.
+enrichment cache hits, job failure/requeue paths (including deleted-actor 404s),
+observable chunked backoff, upload-once storage, object-storage connectivity
+failures, and the health endpoint. Reviewer entrypoint:
+`docker compose run --rm --build test`.
 
 Intentionally not tested (expand): live GitHub, multi-hour Compose soak, UI.
 
