@@ -1,11 +1,19 @@
 # frozen_string_literal: true
 
-require "cgi"
+require "uri"
 
 module Ingest
   # Enriches a PushEvent with actor + repository records, using URL fetches and a TTL cache.
   class EnrichPushEvent
     CACHE_TTL = ENV.fetch("ENRICHMENT_CACHE_TTL_HOURS", "24").to_i.hours
+
+    # GitHub's public events API returns `actor.url` verbatim for bot accounts with
+    # *literal, unescaped* brackets, e.g. "https://api.github.com/users/github-actions[bot]"
+    # (confirmed against the live API, not just our own fallback URL construction below).
+    # That's not a valid URI and raises URI::InvalidURIError deep in Faraday. Escape only
+    # the characters that are actually unsafe in a URI, leaving existing percent-encoding
+    # and normal URL structure (: / ? # @ etc.) untouched.
+    UNSAFE_URL_CHARS = %r{[^A-Za-z0-9\-._~:/?#@!$&'()*+,;=%]}
 
     def initialize(push_event, client: Github::ApiClient.new, cache_ttl: CACHE_TTL)
       @push_event = push_event
@@ -48,7 +56,7 @@ module Ingest
         return existing
       end
 
-      url = actor_data[:url].presence || "https://api.github.com/users/#{CGI.escape(actor_data[:login].to_s)}"
+      url = sanitize_url(actor_data[:url].presence || "https://api.github.com/users/#{actor_data[:login]}")
       log("actor_fetch", github_id: github_id, url: url)
       result = @client.fetch_json(url)
       body = normalize_body(result.body)
@@ -82,6 +90,7 @@ module Ingest
       url = repo_data[:url].presence
       raise ArgumentError, "repository url missing from payload" if url.blank?
 
+      url = sanitize_url(url)
       log("repo_fetch", github_id: github_id, url: url)
       result = @client.fetch_json(url)
       body = normalize_body(result.body)
@@ -96,6 +105,10 @@ module Ingest
 
       raise_if_rate_limited!(result.rate_limit)
       repository
+    end
+
+    def sanitize_url(url)
+      URI::DEFAULT_PARSER.escape(url.to_s, UNSAFE_URL_CHARS)
     end
 
     def normalize_body(body)

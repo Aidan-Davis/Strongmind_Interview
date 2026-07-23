@@ -109,6 +109,42 @@ RSpec.describe Ingest::EnrichPushEvent do
     expect(push_event.actor.login).to eq("github-actions[bot]")
   end
 
+  it "escapes special characters GitHub itself sends unescaped in actor.url" do
+    # Confirmed against the live GitHub events API: for bot accounts, actor.url comes
+    # back as e.g. "https://api.github.com/users/github-actions[bot]" with literal,
+    # unescaped brackets. This is the common real-world path (most events carry a
+    # populated actor.url), distinct from the fallback-construction case above.
+    push_event.update!(
+      raw_payload: raw_payload.deep_merge(
+        "actor" => {
+          "id" => 99,
+          "login" => "github-actions[bot]",
+          "url" => "https://api.github.com/users/github-actions[bot]",
+          "avatar_url" => nil
+        }
+      )
+    )
+
+    expect(client).to receive(:fetch_json).with("https://api.github.com/users/github-actions%5Bbot%5D").and_return(
+      Github::ApiClient::Result.new(
+        body: { "id" => 99, "login" => "github-actions[bot]" },
+        rate_limit: Github::RateLimit.new(remaining: 50)
+      )
+    )
+    allow(client).to receive(:fetch_json).with("https://api.github.com/repos/octocat/hello").and_return(
+      Github::ApiClient::Result.new(
+        body: { "id" => 42, "full_name" => "octocat/hello", "html_url" => "https://github.com/octocat/hello" },
+        rate_limit: Github::RateLimit.new(remaining: 49)
+      )
+    )
+
+    expect { described_class.call(push_event, client: client) }.not_to raise_error
+
+    push_event.reload
+    expect(push_event.enrichment_status).to eq("enriched")
+    expect(push_event.actor.login).to eq("github-actions[bot]")
+  end
+
   it "raises instead of sleeping when the quota is nearly exhausted, without losing the fetch already made" do
     allow(client).to receive(:fetch_json).with("https://api.github.com/users/octocat").and_return(
       Github::ApiClient::Result.new(
