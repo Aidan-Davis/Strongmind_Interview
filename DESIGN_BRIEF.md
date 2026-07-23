@@ -1,17 +1,38 @@
 # Design Brief - GitHub Push Event Ingest
 
-## Problem understanding
+## How I framed the problem
 
-The public events feed is a **lossy, non-replayable, rate-limited firehose**: it
-exposes only the last few minutes of activity, offers no history, and caps an
-unauthenticated caller at ~60 requests/hour per IP. That fixes the priorities, in
-order: **durability** of whatever we capture, **idempotency** across overlapping
-polls and restarts, and **request economy**, since one hourly budget is shared by
-polling and enrichment. Completeness is a non-goal - gaps are inherent to this source.
+The business ask is visibility into GitHub push activity for later analysis - an
+**unattended internal pipeline**, not a product UI. The technical constraint that
+shapes everything else is the data source: the public events feed is a **lossy,
+non-replayable, rate-limited firehose**. It exposes only a short sliding window of
+activity, offers no historical backfill, and caps an unauthenticated caller at
+~60 requests/hour per IP, shared by polling and enrichment.
 
-Concretely: poll the events API (no token), keep only `PushEvent`s, store raw +
-structured records in PostgreSQL, enrich them with actor/repository data, and stay
-predictable under limits, duplicates, and restarts.
+That framing sets priorities, in order:
+
+1. **Capture what we can before it disappears** - durability of whatever we see.
+2. **Never corrupt or double-count under overlap/restarts** - idempotency.
+3. **Spend the shared budget on enrichment, not waste** - request economy.
+
+Completeness is a non-goal: gaps are inherent to this source. Throughput without a
+token is also a non-goal - the brief asks for predictable behavior under limits, not
+max events ingested.
+
+## How I broke it into stories
+
+I treated the four core stories as a **capture → store → enrich → operate** pipeline
+because that matches the failure boundary of the feed:
+
+| Story | Decision it forces |
+|---|---|
+| **1 Ingest** | Stay on the hot path only long enough to persist identity. Anything slower risks missing the window. |
+| **2 Persist** | Make analyst queries cheap *and* keep the original event - the window will roll over, so re-derivation needs a local copy. |
+| **3 Enrich** | Spend scarce GitHub calls *off* the poll path, and only when the cache can't answer. |
+| **4 Operate** | An unattended service that goes silent or crash-loops under rate limits fails the business ask even if the schema is perfect. |
+
+Extensions A–D weren't bolted on afterward - they are how Stories 1–4 stay honest
+under the firehose constraints (budget, duplicates, durable blobs, offline proof).
 
 ## Architecture
 
@@ -36,90 +57,96 @@ flowchart TD
     enrich -->|"avatar, once"| minio
 ```
 
-**Stack:** Rails 8 API-only, PostgreSQL, Redis + Sidekiq, Faraday, MinIO via
-`aws-sdk-s3`, Docker Compose. API-only because there is no UI - the only HTTP surface
-is `GET /up` - so a future dashboard is additive, not a rewrite.
+**Why Rails API-only + Compose.** Preferred stack; no human UI, so views/sessions/
+CSRF are dead weight. The only HTTP surface is `GET /up`. A future dashboard is
+additive. Compose is the deliverable runtime because the brief requires a one-command
+macOS review, not a production deploy story.
 
-**Ingest (Story 1).** `Ingest::PushEventsRunner` polls `/events`, filters to
-`PushEvent`, and upserts on unique `github_event_id`. The loop stays thin - filter,
-upsert, enqueue - and never enriches or uploads inline. This is the central decision:
-the feed is a short sliding window, so if slow work ran inline a hung socket would
-stall polling and events would age out permanently. A backlog of un-enriched rows is
-recoverable; a missed window is not. Decoupling is not parallelism, though: concurrent
-enrichment against one shared budget only causes contention, so Sidekiq runs at
-**concurrency 1**. The queue buys restart safety and window protection, not throughput
-this workload can't use.
+**Why the poll loop is thin (filter → upsert → enqueue).** This is the central
+design choice. If enrichment or MinIO ran inline, a hung socket stalls polling and
+events age out of the window **permanently**. A backlog of `pending` rows is
+recoverable once the dependency returns. I deliberately trade eventual consistency
+(rows queryable before enrichment finishes) for window protection.
 
-**Persistence (Story 2).** Postgres is the system of record. `raw_payload` jsonb (+ an
-optional MinIO copy) retains the original for audit; promoted columns `repository_id`,
-`push_id`, `ref`, `head`, `before` satisfy "queryable without JSON parsing";
-`actors`/`repositories` are caches keyed by GitHub id so enrichment is shared, not
-copied per row. `enrichment_status` (`pending`/`enriched`/`failed`) makes progress and
-failures queryable.
+**Why Sidekiq concurrency = 1.** Decoupling is for restart safety and window
+protection, **not** throughput. Concurrent enrichment against one shared ~60/hour
+budget only amplifies contention. The queue absorbs bursts; the cap drains them at a
+quota-safe rate.
 
-**Enrichment (Story 3).** Runs asynchronously using `actor.url`/`repository.url` from
-the payload, with a 24h `fetched_at` TTL - a cache hit is zero GitHub calls. Eventual
-consistency is accepted: a freshly polled row is queryable immediately but may stay
-`pending` until Sidekiq finishes.
+**Why three persistence shapes, not one blob.** Raw `jsonb` (+ optional object
+copy) exists because the feed can't be re-fetched later. Promoted columns exist so
+analysts don't parse JSON for Story 2's fields. Separate `actors`/`repositories`
+exist so enrichment is a **shared TTL cache**, not a copy-per-event - which is what
+makes fan-out control actually pay off.
 
-**Operability (Story 4).** Structured stdout logs (`[ingest]`/`[enrich]`/`[storage]`)
-cover polls, successes, failures, and retries. Malformed events are logged and skipped;
-the loop catches unexpected errors, backs off, and never crash-loops. Transient
-failures (Faraday, 5xx, 429) retry with jittered backoff; permanent ones (bad payloads,
-deleted-actor 404s) mark `failed` instead of retrying forever. Bounded HTTP timeouts
-stop a hung socket from stalling the poller or the single worker.
+**Why transient ≠ permanent failures.** Unattended means retries must terminate.
+Network/5xx/rate-limit paths retry or re-enqueue; malformed payloads and deleted-
+actor `404`s mark `failed` and stop. Bounded HTTP timeouts keep a hung socket from
+owning the single worker. Structured stdout (`[ingest]`/`[enrich]`/`[storage]`/
+`[job]`) exists so `docker compose logs -f` answers "what is it doing?" without a
+metrics stack.
 
 ## Rate limits & durability
 
-**Rate limits (Extension A).** The scarce resource is enrichment fan-out (up to two
-fetches per new event), not polling (one request, often a cheap `304` via ETag).
-Controls: header-aware `X-RateLimit`/`Retry-After` waits with a chunked countdown so a
-long wait never looks hung; concurrency 1; and rate-limited enrichment jobs
-**re-enqueue after reset** instead of sleeping the worker. A token (5,000/hour) would
-tighten intervals with no redesign.
+**Rate limits.** The scarce resource is enrichment fan-out (up to two fetches per
+new event), not polling. Polling uses ETag/`304` to skip bodies; under no-token,
+those `304`s still count against quota, so the real savings are bandwidth and
+avoiding needless processing - not "free" polls. Header-aware waits, a chunked
+`[ingest] waiting` countdown (so a long wait never looks hung), concurrency 1, and
+**re-enqueue-on-rate-limit** (instead of sleeping the worker) keep the single Sidekiq
+thread free for cheap storage jobs. Assumption: demonstrate honest backoff; a token
+(5,000/hour) would tighten intervals without redesign.
 
-**Idempotency & restarts (Extension B).** Unique `github_event_id` makes duplicate
-polls no-ops; enrichment short-circuits when already `enriched`; actor/repo upserts
-keyed by GitHub id mean a fetch that succeeded before a rate-limit raise is cached on
-retry. There is no checkpoint state to corrupt - killing the runner mid-cycle
-re-processes at most one page, all no-ops. Every unit of work is safe to repeat.
+**Durability / idempotency.** Unique `github_event_id` makes overlapping polls and
+restarts converge rather than duplicate. Enrichment short-circuits when already
+`enriched`; actor/repo upserts keyed by GitHub id mean a fetch that succeeded before
+a rate-limit raise is not wasted on retry. Deterministic object keys + existence
+checks skip re-upload. There is no fragile checkpoint cursor - killing the runner
+mid-cycle re-reads at most one page, all no-ops. Theme: **every unit of work is safe
+to repeat**, which is the only reliable posture for an unattended process.
 
-**Object storage (Extension C).** MinIO stands in for S3 (production S3 is a config
-change). Raw JSON uploads asynchronously after insert (`raw-events/{id}.json`); avatars
-upload once and are best-effort, so a failed avatar never fails enrichment.
-Deterministic keys plus existence checks skip re-upload.
+**Object storage.** Chosen to practice the real S3 shape locally (MinIO via
+`aws-sdk-s3` - production is config). Async raw upload keeps MinIO off the poll
+path. Avatars are best-effort so a decoration failure never fails the record it
+decorates. Bounding *re-work* (upload-once) was in scope; bounding *retention* was
+not - see below.
 
-## Security
-
-This service takes input from an external feed and makes outbound requests on its
-behalf, so a few surfaces are worth naming:
-
-- **SSRF (the sharpest).** Enrichment fetches absolute URLs taken from the payload;
-  today they originate from `api.github.com` and are sanitized only for URL validity.
-  The next control is a **host allowlist** before any fetch. Two mitigations already
-  hold: Faraday follows no redirects, and every request is timeout-bounded, so a
-  hostile host cannot pivot or hang the worker.
-- **No outbound token by design** - there is no credential to leak or over-scope; the
-  cost is the 60/hour budget, taken knowingly.
-- **Log injection** - every logged value is `inspect`-quoted (`AppLog.sanitize`), so a
-  crafted repo name or `ref` cannot forge `key=value` pairs or inject newlines.
-- **Secrets & image** - the Compose secrets and the root, dev-gem image are reviewer
-  conveniences; production uses a secrets manager and a non-root, multi-stage build.
-
-## Key tradeoffs & what I did not build
+## Key tradeoffs & assumptions
 
 | Choice | Why |
 |---|---|
-| Sidekiq over inline enrich | Protects the feed window; survives restarts |
-| Concurrency 1 | No contention on one shared budget |
+| Thin poll + async enrich | Protects the sliding window over enrichment latency |
+| Sidekiq concurrency 1 | One shared budget; parallelism would burn it |
 | No GitHub token | Matches the brief; forces honest rate-limit design |
-| 24h enrichment TTL | Avoids repeated fetches without pretending profiles never change |
+| 24h enrichment TTL | Avoids wasteful refetches without pretending profiles are frozen |
+| Eventual enrichment | Recoverable lag beats permanent missed events |
+| Dev Compose secrets | Reviewer DX only - not production hardening |
 
-Intentionally out of scope, each a decision and not an oversight: no auth or UI
-(querying is SQL; a dashboard stays additive), no historical backfill (the feed has no
-history), no retention/compaction (unbounded growth is fine for the exercise;
-production would add TTL + partitioning), and no metrics backend (plain stdout suits
-`docker compose logs`; production would add JSON logs, OpenTelemetry, and alerting on
-enrichment-failure rate). Testing (Extension D) is hermetic and offline - WebMock
-blocks all outbound HTTP - and the README's requirements-traceability table maps each
-acceptance criterion to the spec that proves it.
+## What I intentionally did not build
+
+Each cut follows from the framing above, not from running out of time:
+
+- **No UI / AuthN/Z** - the ask is an ingest pipeline; analysts query SQL; API-only
+  keeps a dashboard additive.
+- **No historical backfill** - the feed has no history; inventing another source
+  would change the problem.
+- **No retention/compaction** - unbounded growth is acceptable for the exercise;
+  production would add TTL/archival and likely partitioning. Ext C demonstrates
+  upload-once durability, not lifecycle policy.
+- **No authenticated GitHub API** - designing against ~60/hour *is* the challenge;
+  a token drops in without redesign.
+- **No metrics/alerting backend** - stdout satisfies the Compose reviewer loop;
+  production would add structured JSON + OpenTelemetry + alerts on enrichment-failure
+  rate.
+- **No live-GitHub / multi-hour soak in CI** - flaky and quota-dependent; the suite
+  stubs seams with WebMock. Soak risks (hung sockets, retry storms) are engineered
+  out via timeouts, bounded retries, and concurrency caps.
+
+## Security
+
+Enrichment fetches absolute URLs from the payload, so **SSRF** is the sharpest next
+control (host allowlist). Today: Faraday follows no redirects, requests are
+timeout-bounded, and logged values are `inspect`-quoted to blunt log injection. No
+outbound token by design - nothing to leak; the cost is the budget, taken knowingly.
+Compose secrets and a root/dev image are reviewer conveniences, not a production
+posture.
