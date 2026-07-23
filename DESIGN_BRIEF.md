@@ -62,7 +62,7 @@ MinIO stands in for S3 locally. Raw event JSON is uploaded asynchronously after 
 
 ## Testing strategy (Extension D)
 
-RSpec + WebMock cover mapper, rate-limit math, events client status handling, idempotent ingest, enrichment cache hits, job failure/requeue, and upload-once storage behavior.  
+RSpec + WebMock cover the push-event mapper, rate-limit math, events client status handling, model-level `github_event_id` uniqueness, idempotent ingest, enrichment cache hits, job failure/requeue, and upload-once storage behavior.  
 `docker compose run --rm test` is the reviewer entrypoint.
 
 Intentionally not tested: live GitHub, full multi-hour Compose soak, UI.
