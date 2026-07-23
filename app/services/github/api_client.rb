@@ -7,6 +7,11 @@ module Github
   class ApiClient
     DEFAULT_USER_AGENT = "StrongmindInterview-GitHubIngest/1.0"
 
+    # Bound every enrichment request so a hung GitHub socket can't tie up the
+    # Sidekiq worker (concurrency 1) indefinitely.
+    OPEN_TIMEOUT = Integer(ENV.fetch("GITHUB_HTTP_OPEN_TIMEOUT_SECONDS", "5"))
+    READ_TIMEOUT = Integer(ENV.fetch("GITHUB_HTTP_TIMEOUT_SECONDS", "15"))
+
     class Error < StandardError; end
     class RateLimited < Error
       attr_reader :rate_limit
@@ -51,6 +56,8 @@ module Github
       Faraday.new do |f|
         f.request :json
         f.response :json, content_type: /\bjson$/
+        f.options.open_timeout = OPEN_TIMEOUT
+        f.options.timeout = READ_TIMEOUT
         f.adapter Faraday.default_adapter
         f.headers["Accept"] = "application/vnd.github+json"
         f.headers["User-Agent"] = @user_agent

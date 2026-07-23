@@ -5,10 +5,14 @@ require "faraday"
 module ObjectStorage
   # Downloads a contributor avatar once and stores it in object storage.
   class AvatarUploader
+    # Bound avatar downloads so a slow/hung image host can't stall the worker.
+    OPEN_TIMEOUT = Integer(ENV.fetch("AVATAR_HTTP_OPEN_TIMEOUT_SECONDS", "5"))
+    READ_TIMEOUT = Integer(ENV.fetch("AVATAR_HTTP_TIMEOUT_SECONDS", "15"))
+
     def initialize(actor, storage: Client.new, http: nil)
       @actor = actor
       @storage = storage
-      @http = http || Faraday.new
+      @http = http || default_http
     end
 
     def self.call(...)
@@ -53,6 +57,14 @@ module ObjectStorage
     end
 
     private
+
+    def default_http
+      Faraday.new do |f|
+        f.options.open_timeout = OPEN_TIMEOUT
+        f.options.timeout = READ_TIMEOUT
+        f.adapter Faraday.default_adapter
+      end
+    end
 
     def log(event, **fields)
       AppLog.info("storage", event, **fields)
