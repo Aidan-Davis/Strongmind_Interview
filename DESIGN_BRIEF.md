@@ -83,7 +83,8 @@ poller or the single Sidekiq worker.
 
 Unauthenticated GitHub is ~**60 req/hour**, shared by poll + enrichment. The scarce
 resource is enrichment **fan-out** (up to two fetches per new event), not polling
-(often `0` via ETag/`304`). Controls: 60s/90s poll/idle cadence; header-aware
+(one request, often a cheap `304` via ETag that skips the body; unauthenticated
+`304`s still count against the ~60/hour quota). Controls: 60s/90s poll/idle cadence; header-aware
 `X-RateLimit-*`/`Retry-After` waits with a chunked `[ingest] waiting` countdown;
 Sidekiq concurrency = 1 so at most one in-flight enrichment request; rate-limited
 enrichment jobs **re-enqueue after reset** instead of sleeping the worker. Without
