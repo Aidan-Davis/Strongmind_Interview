@@ -6,6 +6,17 @@ module ObjectStorage
   class Client
     class Error < StandardError; end
 
+    # Failures we wrap as our own Error so callers (and the jobs' retry_on
+    # ObjectStorage::Client::Error) can handle storage problems uniformly.
+    # A MinIO/S3 outage surfaces as Seahorse::Client::NetworkingError, which is
+    # NOT an Aws::S3::Errors::ServiceError, so it must be listed explicitly or a
+    # connectivity blip would bypass the declared retry policy entirely.
+    WRAPPED_ERRORS = [
+      Aws::S3::Errors::ServiceError,
+      Seahorse::Client::NetworkingError,
+      Aws::Errors::MissingCredentialsError
+    ].freeze
+
     def initialize(
       bucket: ENV.fetch("AWS_BUCKET", "github-ingest"),
       endpoint: ENV["AWS_ENDPOINT"],
@@ -31,7 +42,7 @@ module ObjectStorage
         content_type: content_type
       )
       key
-    rescue Aws::S3::Errors::ServiceError => e
+    rescue *WRAPPED_ERRORS => e
       raise Error, "put failed for #{key}: #{e.message}"
     end
 
@@ -40,7 +51,7 @@ module ObjectStorage
       true
     rescue Aws::S3::Errors::NotFound, Aws::S3::Errors::NoSuchKey
       false
-    rescue Aws::S3::Errors::ServiceError => e
+    rescue *WRAPPED_ERRORS => e
       raise Error, "exists? failed for #{key}: #{e.message}"
     end
 
