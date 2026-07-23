@@ -36,6 +36,14 @@ docker compose run --rm ingest
 
 Continuous ingestion also runs automatically via `ingest-worker` while the stack is up.
 
+One-shot mode never blocks on GitHub rate limits: if the shared unauthenticated
+quota (~60 req/hour, shared with `ingest-worker`/`sidekiq`) is already low or
+exhausted when you run it, the command logs `rate_limited` /
+`preemptive_rate_limit_wait` with the wait it *would* need and returns
+immediately (exit 0) instead of hanging for up to the ~1 hour reset window.
+Continuous polling via `ingest-worker` keeps running and resumes automatically
+once the quota resets — only the one-shot CLI command short-circuits.
+
 ## Run tests
 
 ```bash

@@ -6,10 +6,17 @@ module Ingest
     DEFAULT_POLL_INTERVAL = Integer(ENV.fetch("INGEST_POLL_INTERVAL_SECONDS", "60"))
     DEFAULT_IDLE_INTERVAL = Integer(ENV.fetch("INGEST_IDLE_INTERVAL_SECONDS", "90"))
 
-    def initialize(client: Github::EventsClient.new, poll_interval: DEFAULT_POLL_INTERVAL, idle_interval: DEFAULT_IDLE_INTERVAL)
+    # +blocking+ controls whether rate-limit/backoff waits actually sleep.
+    # A continuous run_loop process should block (it's a long-running worker
+    # with nothing else to do). A one-shot reviewer invocation (INGEST_MODE=once)
+    # must not: sleeping for up to the full ~1 hour reset window would make
+    # `docker compose run --rm ingest` hang with no way to tell it's still
+    # working, so non-blocking mode logs the state and returns immediately.
+    def initialize(client: Github::EventsClient.new, poll_interval: DEFAULT_POLL_INTERVAL, idle_interval: DEFAULT_IDLE_INTERVAL, blocking: true)
       @client = client
       @poll_interval = poll_interval
       @idle_interval = idle_interval
+      @blocking = blocking
       @etag = nil
     end
 
@@ -38,17 +45,17 @@ module Ingest
       stats.merge(not_modified: false)
     rescue Github::EventsClient::RateLimited => e
       wait = [ e.rate_limit.seconds_until_reset, 5 ].max
-      AppLog.warn("ingest", "rate_limited", wait_seconds: wait, remaining: e.rate_limit.remaining)
-      sleep wait
+      AppLog.warn("ingest", "rate_limited", wait_seconds: wait, remaining: e.rate_limit.remaining, blocking: @blocking)
+      backoff(wait)
       { seen: 0, created: 0, skipped: 0, enqueued: 0, rate_limited: true }
     rescue Faraday::Error, Github::EventsClient::Error => e
-      AppLog.warn("ingest", "transient_error", error: e.class.name, message: e.message)
-      sleep @poll_interval
+      AppLog.warn("ingest", "transient_error", error: e.class.name, message: e.message, blocking: @blocking)
+      backoff(@poll_interval)
       { seen: 0, created: 0, skipped: 0, enqueued: 0, error: e.message }
     rescue StandardError => e
       # Never crash the worker on unexpected errors — log, back off, continue.
-      AppLog.error("ingest", "unexpected_error", error: e.class.name, message: e.message)
-      sleep @poll_interval
+      AppLog.error("ingest", "unexpected_error", error: e.class.name, message: e.message, blocking: @blocking)
+      backoff(@poll_interval)
       { seen: 0, created: 0, skipped: 0, enqueued: 0, error: e.message }
     end
 
@@ -127,8 +134,15 @@ module Ingest
       return unless rate_limit&.should_wait?
 
       wait = [ rate_limit.seconds_until_reset, 1 ].max
-      AppLog.warn("ingest", "preemptive_rate_limit_wait", wait_seconds: wait, remaining: rate_limit.remaining)
-      sleep wait
+      AppLog.warn("ingest", "preemptive_rate_limit_wait", wait_seconds: wait, remaining: rate_limit.remaining, blocking: @blocking)
+      backoff(wait)
+    end
+
+    # In blocking mode (continuous run_loop) actually sleeps. In non-blocking
+    # mode (one-shot INGEST_MODE=once) it's a no-op beyond the warning already
+    # logged by the caller, so the command returns promptly instead of hanging.
+    def backoff(seconds)
+      sleep seconds if @blocking
     end
   end
 end

@@ -56,4 +56,46 @@ RSpec.describe Ingest::PushEventsRunner do
     expect { runner.run_once }.not_to raise_error
     expect(PushEvent.count).to eq(0)
   end
+
+  describe "rate-limit backoff" do
+    let(:low_rate_limit) { Github::RateLimit.new(remaining: 1, reset_at: 40.minutes.from_now) }
+
+    it "does not sleep in non-blocking (one-shot) mode when preemptively rate limited" do
+      runner = described_class.new(client: client, poll_interval: 0, idle_interval: 0, blocking: false)
+      allow(client).to receive(:fetch_events).and_return(
+        Github::EventsClient::Result.new(events: [ push_event ], etag: "W/\"1\"", rate_limit: low_rate_limit, not_modified: false)
+      )
+
+      expect(runner).not_to receive(:sleep)
+
+      result = runner.run_once
+
+      expect(result[:created]).to eq(1)
+    end
+
+    it "does not sleep in non-blocking (one-shot) mode when the fetch itself is rate limited" do
+      runner = described_class.new(client: client, poll_interval: 0, idle_interval: 0, blocking: false)
+      allow(client).to receive(:fetch_events).and_raise(
+        Github::EventsClient::RateLimited.new("limited", rate_limit: low_rate_limit)
+      )
+
+      expect(runner).not_to receive(:sleep)
+
+      result = runner.run_once
+
+      expect(result[:rate_limited]).to be(true)
+    end
+
+    it "still sleeps in blocking (continuous) mode when rate limited" do
+      runner = described_class.new(client: client, poll_interval: 0, idle_interval: 0, blocking: true)
+      allow(client).to receive(:fetch_events).and_raise(
+        Github::EventsClient::RateLimited.new("limited", rate_limit: low_rate_limit)
+      )
+      allow(runner).to receive(:sleep)
+
+      runner.run_once
+
+      expect(runner).to have_received(:sleep)
+    end
+  end
 end
