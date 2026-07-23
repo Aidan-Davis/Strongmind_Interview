@@ -95,7 +95,22 @@ RSpec.describe Ingest::PushEventsRunner do
 
       runner.run_once
 
-      expect(runner).to have_received(:sleep)
+      expect(runner).to have_received(:sleep).at_least(:once)
+    end
+
+    it "breaks a long blocking wait into bounded chunks so it stays observable" do
+      runner = described_class.new(client: client, poll_interval: 0, idle_interval: 0, blocking: true)
+      allow(client).to receive(:fetch_events).and_raise(
+        Github::EventsClient::RateLimited.new("limited", rate_limit: Github::RateLimit.new(remaining: 0, retry_after: 90))
+      )
+      naps = []
+      allow(runner).to receive(:sleep) { |seconds| naps << seconds }
+
+      runner.run_once
+
+      expect(naps.sum).to eq(90)                                            # honors the full wait
+      expect(naps.length).to be > 1                                         # not one silent sleep
+      expect(naps.max).to be <= described_class::HEARTBEAT_SECONDS          # each chunk is bounded
     end
   end
 end

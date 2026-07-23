@@ -6,6 +6,10 @@ module Ingest
     DEFAULT_POLL_INTERVAL = Integer(ENV.fetch("INGEST_POLL_INTERVAL_SECONDS", "60"))
     DEFAULT_IDLE_INTERVAL = Integer(ENV.fetch("INGEST_IDLE_INTERVAL_SECONDS", "90"))
 
+    # A rate-limit wait can be up to ~1 hour. Sleep in chunks this size so the
+    # worker emits a visible countdown instead of going silent and looking hung.
+    HEARTBEAT_SECONDS = Integer(ENV.fetch("INGEST_WAIT_HEARTBEAT_SECONDS", "30"))
+
     # +blocking+ controls whether rate-limit/backoff waits actually sleep.
     # A continuous run_loop process should block (it's a long-running worker
     # with nothing else to do). A one-shot reviewer invocation (INGEST_MODE=once)
@@ -138,11 +142,21 @@ module Ingest
       backoff(wait)
     end
 
-    # In blocking mode (continuous run_loop) actually sleeps. In non-blocking
-    # mode (one-shot INGEST_MODE=once) it's a no-op beyond the warning already
-    # logged by the caller, so the command returns promptly instead of hanging.
+    # In blocking mode (continuous run_loop) sleeps, but in bounded chunks with
+    # a countdown heartbeat so a long rate-limit wait (up to ~1h) never leaves
+    # `docker compose logs` silent and looking hung. In non-blocking mode
+    # (one-shot INGEST_MODE=once) it's a no-op beyond the warning already logged
+    # by the caller, so the command returns promptly instead of hanging.
     def backoff(seconds)
-      sleep seconds if @blocking
+      return unless @blocking
+
+      remaining = seconds.to_i
+      while remaining.positive?
+        nap = [ remaining, HEARTBEAT_SECONDS ].min
+        sleep nap
+        remaining -= nap
+        AppLog.info("ingest", "waiting", seconds_remaining: remaining) if remaining.positive?
+      end
     end
   end
 end
