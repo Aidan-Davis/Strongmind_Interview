@@ -119,3 +119,16 @@ Expect structured lines like:
 - `[job] start` / `success` / `failure`
 
 Malformed events are skipped (no crash). Transient GitHub/MinIO errors are logged and retried; the ingest loop keeps running.
+
+### Step 8 — Tests
+```bash
+docker compose run --rm test
+```
+Expect RSpec examples to pass. Coverage focuses on:
+- push event mapping + idempotent ingest
+- GitHub rate-limit parsing / client behavior
+- enrichment happy path + cache hits
+- enrichment job permanent failure + rate-limit requeue
+- object storage upload-once behavior
+
+Intentionally not covered: live GitHub calls, full Compose E2E against the public API.
