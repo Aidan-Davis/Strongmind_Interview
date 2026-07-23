@@ -21,7 +21,10 @@ class EnrichPushEventJob < ApplicationJob
     end
 
     Ingest::EnrichPushEvent.call(push_event)
-  rescue ArgumentError => e
+  rescue ArgumentError, URI::InvalidURIError => e
+    # Permanent, non-retryable: malformed payload data (e.g. an unparseable
+    # fallback URL) will never succeed on retry, so don't let it fall through
+    # to Sidekiq's default retry and loop indefinitely on the same bad input.
     AppLog.error("enrich", "permanent_failure", push_event_id: push_event_id, error: e.message)
     push_event&.update!(enrichment_status: "failed")
   rescue Github::ApiClient::RateLimited => e

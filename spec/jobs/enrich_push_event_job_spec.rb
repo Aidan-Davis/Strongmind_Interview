@@ -28,6 +28,16 @@ RSpec.describe EnrichPushEventJob, type: :job do
     expect(push_event.reload.enrichment_status).to eq("failed")
   end
 
+  it "marks permanent URI::InvalidURIError failures as failed without re-raising" do
+    allow(Ingest::EnrichPushEvent).to receive(:call).and_raise(
+      URI::InvalidURIError, 'bad URI (is not URI?): "https://api.github.com/users/foo[bot]"'
+    )
+
+    expect { described_class.perform_now(push_event.id) }.not_to raise_error
+
+    expect(push_event.reload.enrichment_status).to eq("failed")
+  end
+
   it "requeues when GitHub rate limits the request" do
     allow(Ingest::EnrichPushEvent).to receive(:call).and_raise(
       Github::ApiClient::RateLimited.new(

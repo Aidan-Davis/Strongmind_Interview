@@ -81,4 +81,31 @@ RSpec.describe Ingest::EnrichPushEvent do
     expect(push_event.repository_record_id).to eq(repo.id)
     expect(push_event.enrichment_status).to eq("enriched")
   end
+
+  it "escapes special characters in the login when building the fallback actor URL" do
+    push_event.update!(
+      raw_payload: raw_payload.deep_merge(
+        "actor" => { "id" => 99, "login" => "github-actions[bot]", "url" => nil, "avatar_url" => nil }
+      )
+    )
+
+    expect(client).to receive(:fetch_json).with("https://api.github.com/users/github-actions%5Bbot%5D").and_return(
+      Github::ApiClient::Result.new(
+        body: { "id" => 99, "login" => "github-actions[bot]" },
+        rate_limit: Github::RateLimit.new(remaining: 50)
+      )
+    )
+    allow(client).to receive(:fetch_json).with("https://api.github.com/repos/octocat/hello").and_return(
+      Github::ApiClient::Result.new(
+        body: { "id" => 42, "full_name" => "octocat/hello", "html_url" => "https://github.com/octocat/hello" },
+        rate_limit: Github::RateLimit.new(remaining: 49)
+      )
+    )
+
+    expect { described_class.call(push_event, client: client) }.not_to raise_error
+
+    push_event.reload
+    expect(push_event.enrichment_status).to eq("enriched")
+    expect(push_event.actor.login).to eq("github-actions[bot]")
+  end
 end

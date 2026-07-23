@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "cgi"
+
 module Ingest
   # Enriches a PushEvent with actor + repository records, using URL fetches and a TTL cache.
   class EnrichPushEvent
@@ -46,7 +48,7 @@ module Ingest
         return existing
       end
 
-      url = actor_data[:url].presence || "https://api.github.com/users/#{actor_data[:login]}"
+      url = actor_data[:url].presence || "https://api.github.com/users/#{CGI.escape(actor_data[:login].to_s)}"
       log("actor_fetch", github_id: github_id, url: url)
       result = @client.fetch_json(url)
       wait_if_needed!(result.rate_limit)
