@@ -38,6 +38,20 @@ RSpec.describe EnrichPushEventJob, type: :job do
     expect(push_event.reload.enrichment_status).to eq("failed")
   end
 
+  it "marks 404 NotFound (deleted actor/repo) as failed without re-raising or retrying" do
+    allow(Ingest::EnrichPushEvent).to receive(:call).and_raise(
+      Github::ApiClient::NotFound, "GitHub resource not found: https://api.github.com/users/ghost"
+    )
+
+    # The block form also fails loudly if perform re-raised, so this covers the
+    # "does not re-raise" and "does not re-enqueue a retry" guarantees together.
+    expect {
+      described_class.perform_now(push_event.id)
+    }.not_to have_enqueued_job(described_class)
+
+    expect(push_event.reload.enrichment_status).to eq("failed")
+  end
+
   it "requeues when GitHub rate limits the request" do
     allow(Ingest::EnrichPushEvent).to receive(:call).and_raise(
       Github::ApiClient::RateLimited.new(
