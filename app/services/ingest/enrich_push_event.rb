@@ -51,17 +51,21 @@ module Ingest
       url = actor_data[:url].presence || "https://api.github.com/users/#{CGI.escape(actor_data[:login].to_s)}"
       log("actor_fetch", github_id: github_id, url: url)
       result = @client.fetch_json(url)
-      wait_if_needed!(result.rate_limit)
       body = normalize_body(result.body)
 
-      Actor.find_or_initialize_by(github_id: body.fetch("id")).tap do |actor|
-        actor.login = body.fetch("login")
-        actor.avatar_url = body["avatar_url"]
-        actor.profile_json = body
-        actor.fetched_at = Time.current
-        actor.save!
-        ensure_avatar!(actor)
+      actor = Actor.find_or_initialize_by(github_id: body.fetch("id")).tap do |a|
+        a.login = body.fetch("login")
+        a.avatar_url = body["avatar_url"]
+        a.profile_json = body
+        a.fetched_at = Time.current
+        a.save!
+        ensure_avatar!(a)
       end
+
+      # Check after persisting so a fetch that already succeeded isn't wasted;
+      # the next attempt will hit the cache above instead of re-fetching.
+      raise_if_rate_limited!(result.rate_limit)
+      actor
     end
 
     def resolve_repository(repo_data)
@@ -80,16 +84,18 @@ module Ingest
 
       log("repo_fetch", github_id: github_id, url: url)
       result = @client.fetch_json(url)
-      wait_if_needed!(result.rate_limit)
       body = normalize_body(result.body)
 
-      Repository.find_or_initialize_by(github_id: body.fetch("id")).tap do |repo|
+      repository = Repository.find_or_initialize_by(github_id: body.fetch("id")).tap do |repo|
         repo.full_name = body["full_name"].presence || repo_data[:name]
         repo.html_url = body["html_url"]
         repo.profile_json = body
         repo.fetched_at = Time.current
         repo.save!
       end
+
+      raise_if_rate_limited!(result.rate_limit)
+      repository
     end
 
     def normalize_body(body)
@@ -98,12 +104,19 @@ module Ingest
       body.deep_stringify_keys
     end
 
-    def wait_if_needed!(rate_limit)
+    # Signals rate-limit exhaustion instead of sleeping in-thread: Sidekiq runs
+    # this job with concurrency 1, so a blocking sleep here would stall every
+    # other queued job (including cheap raw-event uploads) for up to an hour.
+    # Raising lets EnrichPushEventJob re-enqueue with a delay instead, freeing
+    # the worker to process other jobs while waiting for the quota to reset.
+    def raise_if_rate_limited!(rate_limit)
       return unless rate_limit&.should_wait?
 
-      wait = [ rate_limit.seconds_until_reset, 1 ].max
-      log("preemptive_rate_limit_wait", wait_seconds: wait, remaining: rate_limit.remaining)
-      sleep wait
+      log("preemptive_rate_limit", wait_seconds: rate_limit.seconds_until_reset, remaining: rate_limit.remaining)
+      raise Github::ApiClient::RateLimited.new(
+        "GitHub rate limit nearly exhausted (remaining=#{rate_limit.remaining})",
+        rate_limit: rate_limit
+      )
     end
 
     def ensure_avatar!(actor)

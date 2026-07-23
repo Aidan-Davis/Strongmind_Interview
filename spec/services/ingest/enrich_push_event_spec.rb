@@ -108,4 +108,23 @@ RSpec.describe Ingest::EnrichPushEvent do
     expect(push_event.enrichment_status).to eq("enriched")
     expect(push_event.actor.login).to eq("github-actions[bot]")
   end
+
+  it "raises instead of sleeping when the quota is nearly exhausted, without losing the fetch already made" do
+    allow(client).to receive(:fetch_json).with("https://api.github.com/users/octocat").and_return(
+      Github::ApiClient::Result.new(
+        body: { "id" => 7, "login" => "octocat", "avatar_url" => "https://avatars.example/u/7" },
+        rate_limit: Github::RateLimit.new(remaining: 2, reset_at: 10.minutes.from_now)
+      )
+    )
+
+    expect(client).not_to receive(:fetch_json).with("https://api.github.com/repos/octocat/hello")
+
+    expect { described_class.call(push_event, client: client) }.to raise_error(Github::ApiClient::RateLimited)
+
+    # The actor fetch that already succeeded is persisted (and cached for the
+    # next attempt) rather than thrown away; only the push_event itself stays
+    # pending so the job can re-enqueue and pick up where it left off.
+    expect(Actor.find_by(github_id: 7)).to have_attributes(login: "octocat")
+    expect(push_event.reload.enrichment_status).to eq("pending")
+  end
 end
