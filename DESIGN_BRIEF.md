@@ -100,6 +100,16 @@ Before submitting, I re-ran the reviewer flow end-to-end from a clean checkout (
 
 **Verification note:** all four fixes were re-confirmed against a brand-new clone after the fixes were pushed, not just in the environment where they were found. The schema race (#4) is the flakiest of the four by nature, so it was stress-tested hardest: 11 separate `docker compose up`-on-a-fresh-volume cycles, each torn down (`down -v`) before the next. The race actually triggered in the large majority of those runs — sometimes `ingest-worker` lost it, once `web` lost it, on two different Postgres catalog constraints (`pg_class_relname_nsp_index`, `pg_type_typname_nsp_index`) — and every single time the retry recovered cleanly with all containers reaching `Up`. The bot-account URL fix (#1) was checked directly against a live `actor.url` value pulled from the real GitHub events API, not just a synthetic test fixture.
 
+## Removed unused Rails scaffolding
+
+`rails new` generates deploy/CI/test tooling this exercise doesn't use. Rather than leave it in as unreviewed dead weight, it was removed as a final pass:
+
+- **Kamal** (`.kamal/`, `config/deploy.yml`, `bin/kamal`, the `kamal` gem) — deploy-to-a-server tooling with no target here; Compose is the deliverable runtime, and this is called out explicitly under "Intentionally not built" above.
+- **GitHub Actions CI + Dependabot** (`.github/workflows/ci.yml`, `.github/dependabot.yml`) — the generated CI workflow actually ran the *wrong* test suite (`bin/rails db:test:prepare test`, i.e. Minitest) and never provisioned Redis or MinIO, so it would not have exercised this project's real RSpec suite or caught any of the bugs above even if left in place; keeping a CI workflow that silently doesn't test anything real seemed worse than having none. Dependabot had already opened a handful of dependency-bump PRs against default settings I never configured.
+- **The unused Minitest `test/` directory** — this project's tests are RSpec under `spec/` (`docker compose run --rm test`); the generated Minitest stubs under `test/` never ran and would only confuse a reviewer about which suite is authoritative.
+
+`Gemfile`/`Gemfile.lock` were regenerated after removing the `kamal` gem; `rubocop` (49 files, no offenses) and the full RSpec suite (32 examples, 0 failures) were re-run against the trimmed tree, and a full `docker compose up` was re-verified end to end.
+
 ## What “done” means
 
 From a clean checkout: `docker compose up --build` runs without crash-looping; ingest creates durable PushEvent rows; enrichment attaches actor/repo when quota allows; MinIO holds raw/avatar objects; tests pass under Compose; operators can diagnose behavior from logs alone.
