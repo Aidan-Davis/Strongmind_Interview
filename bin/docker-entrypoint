@@ -10,17 +10,33 @@ fi
 
 prepare_db() {
   echo "[entrypoint] Preparing database (RAILS_ENV=${RAILS_ENV:-development})..."
-  ./bin/rails db:prepare
+  # web, ingest-worker, and the one-shot ingest/test services all reach this on
+  # `docker compose up`/`run` and each call db:prepare against a database that
+  # may still be completely empty. On a fresh volume two containers can both
+  # see "no schema yet" and race to load schema.rb, so the loser crashes with
+  # a Postgres duplicate-key error instead of a clean migration/no-op. Retry a
+  # few times: once one container wins the race, the others will find the
+  # schema already loaded and succeed immediately.
+  local attempt=1
+  local max_attempts=6
+  until ./bin/rails db:prepare; do
+    if [ "${attempt}" -ge "${max_attempts}" ]; then
+      echo "[entrypoint] db:prepare failed after ${attempt} attempts, giving up." >&2
+      return 1
+    fi
+    echo "[entrypoint] db:prepare failed (attempt ${attempt}/${max_attempts}), likely racing another container loading the same fresh schema; retrying in 2s..." >&2
+    attempt=$((attempt + 1))
+    sleep 2
+  done
 }
 
-# Only the web server owns migrations to avoid ConcurrentMigrationError with sidekiq.
+# Every entrypoint that touches the DB schema (server, ingest, rspec) runs
+# db:prepare itself; prepare_db's retry loop keeps concurrent callers from
+# crashing on a fresh database instead of trying to serialize who "owns" it.
 case "${1}" in
   ./bin/rails|bin/rails)
-    if [ "${2}" = "server" ]; then
+    if [ "${2}" = "server" ] || [ "${2}" = "ingest:run" ]; then
       prepare_db
-    elif [ "${2}" = "ingest:run" ]; then
-      # Ingest assumes schema exists; create DB if needed without fighting web.
-      ./bin/rails db:prepare
     fi
     ;;
   bundle)
